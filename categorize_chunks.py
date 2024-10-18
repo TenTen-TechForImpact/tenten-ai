@@ -20,7 +20,7 @@ def categorize_chunks(chunks):
 
         대화: "{chunk}"
 
-        이 대화의 카테고리는?:
+        이 대화의 카테고리는? (1-7 숫자로 입력해주세요):
         """
 
         response = client.chat.completions.create(model="gpt-3.5-turbo",
@@ -30,6 +30,6 @@ def categorize_chunks(chunks):
         max_tokens=50)
 
         category = response.choices[0].message.content.strip()
-        categorized_chunks.append({'chunk': chunk, 'category': category})
+        categorized_chunks.append({'chunk': chunk, 'category': category[0]})
 
     return categorized_chunks
