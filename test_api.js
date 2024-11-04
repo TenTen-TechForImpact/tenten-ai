@@ -1,43 +1,25 @@
-const https = require('https');
+// pages/api/invokeLambda.js
+import axios from 'axios';
 
-// Define the data you want to send in the request body
-const data = JSON.stringify({
-  s3_url: "s3://tenten-bucket/transcriptions/transcription.json"
-});
-
-// Set up the options for the HTTPS request
-const options = {
-  hostname: 'z4wbvjyfjf.execute-api.ap-northeast-2.amazonaws.com',
-  port: 443,
-  path: '/mvp/topic',
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Content-Length': data.length
+export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ message: 'Method not allowed' });
   }
-};
 
-// Make the request
-const req = https.request(options, (res) => {
-  let responseData = '';
+  try {
+    // Lambda URL (API Gateway의 엔드포인트)
+    const lambdaUrl = 'https://your-api-gateway-endpoint.amazonaws.com/prod/invoke'; // 여기에 실제 API Gateway URL을 입력하세요
 
-  // Collect response data
-  res.on('data', (chunk) => {
-    responseData += chunk;
-  });
+    // 클라이언트에서 받은 데이터 (S3 URL 포함)
+    const { s3Url } = req.body;
 
-  // Log the response when it is complete
-  res.on('end', () => {
-    console.log('Response:', responseData);
-  });
-});
+    // Lambda로 요청을 전송
+    const response = await axios.post(lambdaUrl, { s3_url: s3Url });
 
-// Handle any errors
-req.on('error', (error) => {
-  console.error('Error:', error);
-});
-
-// Write data to request body
-req.write(data);
-req.end();
-
+    // Lambda 응답 반환
+    res.status(200).json(response.data);
+  } catch (error) {
+    console.error('Error invoking Lambda:', error);
+    res.status(500).json({ error: 'Failed to invoke Lambda' });
+  }
+}

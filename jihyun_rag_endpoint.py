@@ -13,7 +13,7 @@ from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import Chroma
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
-
+from supabase import create_client, Client
 import requests
 
 
@@ -31,6 +31,10 @@ os.environ["OPENAI_API_KEY"] = openai_api_key
 os.environ["LANGCHAIN_PROJECT"] = "tech4impact_1010"
 os.environ["LANGCHAIN_API_KEY"] = langchain_api_key
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
+
+SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+SUPABASE_KEY = os.getenv("NEXT_PUBLIC_SUPABASE_SERVICE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # 시간 변환 함수
 def ms_to_minutes_seconds_str(milliseconds):
@@ -56,35 +60,31 @@ def lambda_handler(event, context):
         logging.info(f"Received event: {event}")
         print(event)
         # Extract the body from the event and parse it
-        if 'body' not in event:
-            raise ValueError("Request body is missing from the event")
+        if 'Records' not in event or not event['Records']:
+            raise ValueError("No records found in the event")
 
-        body = json.loads(event['body'])  # Parse the JSON body
-        s3_url = body.get("s3_url")
+        # Loop through each record (though usually, there will be one)
+        for record in event['Records']:
+            body = json.loads(record['body'])  # Parse the JSON string
+            recording_id = body.get("recording_id")
 
-        if not s3_url:
-            raise ValueError("s3_url is missing from the event")
+            if not recording_id:
+                raise ValueError("recording_id is missing from the message")
 
-        # Parse the bucket name and key from the s3_url
-        if not s3_url.startswith("s3://"):
-            raise ValueError("Invalid S3 URL. It should start with 's3://'.")
-        # Parse the bucket name and key from the s3_url
-        if not s3_url.startswith("s3://"):
-            raise ValueError("Invalid S3 URL. It should start with 's3://'.")
+            print(f"Received recording_id: {recording_id}")
 
-        s3_parts = s3_url.replace("s3://", "").split("/", 1)
-        bucket_name = s3_parts[0]
-        object_key = s3_parts[1]
-
-        # Use Boto3 to fetch the JSON file from S3
-        s3_client = boto3.client('s3')
-        response = s3_client.get_object(Bucket=bucket_name, Key=object_key)
-        data = json.loads(response['Body'].read().decode('utf-8'))
-        
     
-        utterances = data.get("utterances", [])
-        subtopics = data.get("subtopics", [])
-        
+        #유효한 recording_id. 이제부터 시작
+        set_topic_status(recording_id, "in_progress")
+
+        utterance_response = supabase.from_("Utterance").select("*").eq("recording_id", recording_id).order("start_at", ascending=True).execute()
+
+        if utterance_response.get("error"):
+            logging.error(f"Error fetching utterances from Supabase: {utterance_response['error']}")
+            raise Exception("Failed to fetch utterances from Supabase")
+
+        utterances = utterance_response.get("data", [])
+            
         # 문서 객체 생성
         documents = [Document(page_content=utterance['msg'], metadata={
             'start_at': utterance['start_at'],
@@ -167,16 +167,31 @@ def lambda_handler(event, context):
             related_scripts = [{"time": ms_to_minutes_seconds_str(doc.metadata['start_at']), "content": doc.page_content} for doc in relevant_docs]
             json_result = {"topic_id": idx, "start_time": start_time_str, "end_time": end_time_str, "content": subtopic, "related_scripts": related_scripts}
             json_results.append(json_result)
-
+        
+        #Supabase에 저장
+        for result in json_results:
+            response = supabase.table("TopicSummary").insert(result).execute()
+            if response.get("error"):
+                logging.error(f"Error inserting into Supabase: {response['error']}")
+                raise Exception("Failed to insert data into Supabase")
+        set_topic_status(recording_id, "completed")
         # 결과 반환
         return {
             "statusCode": 200,
-            "body": json.dumps(json_results, ensure_ascii=False)
-        }
+            "body": json.dumps({"message": "SQS message processed successfully"}, ensure_ascii=False)
+        }   
 
     except Exception as e:
-        logging.error(f"오류 발생: {e}")
+        logging.error(f"Error occurred: {e}")
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
+            "body": json.dumps({"error": str(e)}, ensure_ascii=False)
         }
+    
+
+def set_topic_status(recording_id: str, status: str):
+    """Update the topic_status in Supabase."""
+    response = supabase.table("Recording").update({"topic_status": status}).eq("id", recording_id).execute()
+    if response.get("error"):
+        logging.error(f"Error updating topic_status: {response['error']}")
+        raise Exception("Failed to update topic_status")
