@@ -1,7 +1,7 @@
 __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-
+import datetime
 import json
 import re
 import boto3  # Import Boto3 for S3 access
@@ -77,27 +77,29 @@ def lambda_handler(event, context):
         #유효한 recording_id. 이제부터 시작
         set_topic_status(recording_id, "in_progress")
 
-        utterance_response = supabase.from_("Utterance").select("*").eq("recording_id", recording_id).order("start_at", ascending=True).execute()
+        utterance_response = supabase.from_("Utterance").select("*").eq("recording_id", recording_id).order("started_at").execute()
 
-        if utterance_response.get("error"):
-            logging.error(f"Error fetching utterances from Supabase: {utterance_response['error']}")
+        if not utterance_response.data:
+            logging.error(f"Error fetching utterances from Supabase: {utterance_response}")
             raise Exception("Failed to fetch utterances from Supabase")
 
-        utterances = utterance_response.get("data", [])
-            
+        utterances = utterance_response.data
+        if not utterances:
+            raise ValueError("No utterances found for the given recording_id")
+   
         # 문서 객체 생성
         documents = [Document(page_content=utterance['msg'], metadata={
-            'start_at': utterance['start_at'],
+            'started_at': utterance['started_at'],
             'duration': utterance['duration'],
-            'speaker': utterance['spk'],
-            'speaker_type': utterance['spk_type']
+  
         }) for utterance in utterances]
-
+        #          'speaker': utterance['spk'],
+         #   'speaker_type': utterance['spk_type']
         # 정렬
-        documents = sorted(documents, key=lambda doc: doc.metadata['start_at'])
+        documents = sorted(documents, key=lambda doc: doc.metadata['started_at'])
         full_text = ''
         for doc in documents:
-                start_time_str = ms_to_minutes_seconds_str(doc.metadata['start_at'])
+                start_time_str = ms_to_minutes_seconds_str(doc.metadata['started_at'])
                 full_text += f"[{start_time_str}] {doc.page_content}\n"
         
         
@@ -161,19 +163,23 @@ def lambda_handler(event, context):
             end_time_ms = time_str_to_ms(end_time_str)
             
             retrieved_docs = retriever.get_relevant_documents(subtopic)
-            relevant_docs = [doc for doc in retrieved_docs if start_time_ms <= doc.metadata['start_at'] <= end_time_ms]
+            relevant_docs = [doc for doc in retrieved_docs if start_time_ms <= doc.metadata['started_at'] <= end_time_ms]
             
             # JSON 데이터 생성
-            related_scripts = [{"time": ms_to_minutes_seconds_str(doc.metadata['start_at']), "content": doc.page_content} for doc in relevant_docs]
-            json_result = {"topic_id": idx, "start_time": start_time_str, "end_time": end_time_str, "content": subtopic, "related_scripts": related_scripts}
+            related_scripts = [{"time": ms_to_minutes_seconds_str(doc.metadata['started_at']), "content": doc.page_content} for doc in relevant_docs]
+            json_result = {"topic_id": idx,"recording_id":recording_id,"start_time": start_time_ms, "end_time": end_time_ms, "content": subtopic, "related_scripts": related_scripts,"summary_type":"topic_mvp",
+            "created_at": datetime.datetime.utcnow().isoformat() + 'Z',
+            "modified_at": datetime.datetime.utcnow().isoformat() + 'Z'
+            }
             json_results.append(json_result)
         
         #Supabase에 저장
         for result in json_results:
             response = supabase.table("TopicSummary").insert(result).execute()
-            if response.get("error"):
+            if response.data is None:
                 logging.error(f"Error inserting into Supabase: {response['error']}")
                 raise Exception("Failed to insert data into Supabase")
+            
         set_topic_status(recording_id, "completed")
         # 결과 반환
         return {
@@ -192,6 +198,6 @@ def lambda_handler(event, context):
 def set_topic_status(recording_id: str, status: str):
     """Update the topic_status in Supabase."""
     response = supabase.table("Recording").update({"topic_status": status}).eq("id", recording_id).execute()
-    if response.get("error"):
+    if response.data is None:
         logging.error(f"Error updating topic_status: {response['error']}")
         raise Exception("Failed to update topic_status")
